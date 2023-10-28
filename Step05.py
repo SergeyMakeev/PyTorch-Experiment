@@ -38,8 +38,8 @@ print("-----------------")
 y0 = torch.matmul(x, normal).clamp(0, 1)
 y1 = y0.unsqueeze(1)        # (1000) -> (1000, 1)
 y2 = albedo.unsqueeze(0)    # (3) -> (1,3)
-y3 = y1 * y2                # multiply
-y = y3.view(-1)             # linearize
+y3 = y1 * y2                # multiply (1000,3)
+y = y3.view(-1)             # linearize (1000,3) -> (3000,)
 
 # our initial guess
 std = 1e-2
