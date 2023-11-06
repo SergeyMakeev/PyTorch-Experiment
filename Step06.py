@@ -31,10 +31,11 @@ def save_normals(normals, width, height, path):
 
 def run():
 
-    img_width = 16
-    img_height = 16
+
+    img_width = 256
+    img_height = 256
     num_pixels = img_width * img_height
-    num_samples = 256
+    num_samples = 16
 
     dtype = torch.float
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -42,6 +43,7 @@ def run():
     torch.set_default_device(device)
 
     # generate random light directions
+    torch.manual_seed(13)
     random_light_directions = torch.randn(num_samples, 3, dtype=dtype)
     x = random_light_directions / random_light_directions.norm(dim=1, keepdim=True)
 
@@ -57,7 +59,7 @@ def run():
     y = y_m.flatten()                               # linearize (num_samples * num_pixels * 3)
 
     # our initial guess
-    std = 1e-2
+
     # initial normals/albedo
     _normal = torch.full((num_pixels, 3), 0.001, dtype=dtype, requires_grad=True)
     _albedo = torch.full((num_pixels, 3), 0.001, dtype=dtype, requires_grad=True)
@@ -66,8 +68,8 @@ def run():
     # _normal = normal_map.clone().detach().requires_grad_(True)
     # _albedo = albedo.clone().detach().requires_grad_(True)
 
-    learning_rate = 0.05
-    for t in range(250000):
+    learning_rate = 40.0
+    for t in range(100000):
         # Forward pass: compute predicted y using operations on Tensors.
         _normal_norm = _normal / _normal.norm(dim=1, keepdim=True)
         _y_dp = torch.matmul(_normal_norm, x.t())  # (num_pixels, num_samples)
@@ -80,11 +82,7 @@ def run():
         # loss.item() gets the scalar value held in the loss.
         loss = (y_pred - y).pow(2).mean()
 
-        if loss.item() < 0.0000001:
-            print("Converged!")
-            break
-
-        if t % 10000 == 0:
+        if t % 1000 == 0:
             print(t, loss.item())
             save_albedo(_albedo, img_width, img_height, f"out/in_albedo_{t}.png")
             save_normals(_normal, img_width, img_height, f"out/in_normals_{t}.png")
