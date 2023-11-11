@@ -94,12 +94,12 @@ def pi():
 
 # take two arrays of vec3 as input
 #   a = [N,3]
-#   b = [M,3]
+#   b = [1,3]
 # compute dot product between all As and Bs
-#  and return the result as tensor shaped [N, M]
+#  and return the result as tensor shaped [N, 1]
 def dot3(a, b):
     assert_is_tensor_shaped_nx3(a)
-    assert_is_tensor_shaped_nx3(b)
+    assert_is_tensor_shaped_1x3(b)
     dp = torch.matmul(a, b.t())
     num_a = a.shape[0]
     num_b = b.shape[0]
@@ -107,6 +107,20 @@ def dot3(a, b):
         raise ValueError
     if dp.shape[1] != num_b:
         raise ValueError
+    return dp
+
+
+# take two arrays of vec3 as input
+#   a = [N,3]
+#   b = [N,3]
+# compute dot product between all As and Bs
+#  and return the result as tensor shaped [N, 1]
+def _dot3(a, b):
+    assert_is_tensor_shaped_nx3(a)
+    assert_is_tensor_shaped_nx3(b)
+    if a.shape[0] != b.shape[0]:
+        raise ValueError
+    dp = (a * b).sum(dim=1, keepdim=True)
     return dp
 
 
@@ -177,6 +191,20 @@ def save_as_normals(normals, width, height, path):
     # convert to 0..1 range
     raw_image = (raw_image + 1.0) * 0.5
     torchvision.utils.save_image(raw_image, path)
+
+
+# generate positions inside a "plane" with the following bounds
+# X: -1..1
+# Y: -1..1
+# Z: 0
+def generate_positions(width, height):
+    x = torch.linspace(-1, 1, width)
+    y = torch.linspace(-1, 1, height)
+    xx, yy = torch.meshgrid(x, y)
+    zz = torch.zeros_like(xx)
+    points = torch.stack((xx.t(), yy.t(), zz.t()), dim=-1)
+    points = points.reshape(-1, 3)
+    return points
 
 
 #
@@ -297,40 +325,42 @@ def brdf_ggx(roughness, n_dot_h, n_dot_v, n_dot_l):
 #     a2 / (math.pi * t * t)
 
 class SurfaceProperties:
-    def __init__(self, base_color: torch.Tensor, normal: torch.Tensor, roughness: torch.Tensor, metallic: torch.Tensor):
+    def __init__(self, base_color: torch.Tensor, normal: torch.Tensor, roughness: torch.Tensor, metallic: torch.Tensor,
+                 positions: torch.Tensor):
         assert_is_tensor_shaped_nx3(base_color)
         assert_is_tensor_shaped_nx3(normal)
         assert_is_tensor_shaped_nx1(roughness)
         assert_is_tensor_shaped_nx1(metallic)
+        assert_is_tensor_shaped_nx3(positions)
 
         n_clr = base_color.shape[0]
         n_nrm = normal.shape[0]
         n_rgh = roughness.shape[0]
         n_mtl = metallic.shape[0]
+        n_pos = positions.shape[0]
 
         # check all tensors have the same resolution
-        if n_clr != n_nrm or n_clr != n_rgh or n_clr != n_mtl:
+        if n_clr != n_nrm or n_clr != n_rgh or n_clr != n_mtl or n_clr != n_pos:
             raise ValueError
 
         self.base_color = base_color
         self.normal = normal
         self.perceptual_roughness = roughness
         self.metallic = metallic
+        self.positions = positions
 
 
 class SceneProperties:
-    def __init__(self, light_dir, view_dir, light_color, ambient_color):
+    def __init__(self, light_dir, light_color, ambient_color):
         assert_is_tensor_shaped_1x3(light_dir)
         assert_is_tensor_shaped_1x3(light_color)
-        assert_is_tensor_shaped_1x3(view_dir)
         assert_is_tensor_shaped_1x3(ambient_color)
         self.light_dir = normalize_vec3(light_dir)
         self.light_color = light_color
-        self.view_dir = normalize_vec3(view_dir)
         self.ambient_color = ambient_color
 
 
-def render_brdf(surface: SurfaceProperties, scene: SceneProperties):
+def render_brdf(surface: SurfaceProperties, scene: SceneProperties, w, h):
 
     dielectric_f0 = torch.full_like(surface.base_color, 0.04)
     albedo = gamma_to_linear(surface.base_color)
@@ -339,8 +369,19 @@ def render_brdf(surface: SurfaceProperties, scene: SceneProperties):
     f0 = torch.lerp(dielectric_f0, albedo, surface.metallic)
     one_minus_metalness = 1 - surface.metallic
 
+    # virtual camera pos (10 units above the plane)
+    cam_pos = vec3(0.0, 0.0, 10.0)
+
     # direction from a pixel to a camera position
-    view_dir = scene.view_dir
+    _view_dir = cam_pos - surface.positions
+
+    view_dir = normalize_vec3(_view_dir)
+
+    save_as_normals(surface.positions, w, h, "out/debug_pos.png")
+    save_as_normals(normal, w, h, "out/debug_normals.png")
+    save_as_normals(view_dir, w, h, "out/debug_view_dir.png")
+    save_as_rgb(linear_to_gamma(albedo), w, h, "out/debug_albedo.png")
+    save_as_rgb(linear_to_gamma(f0), w, h, "out/debug_f0.png")
 
     # direction from a pixel position to a light position (-light_dir in case of directional light)
     light_dir = scene.light_dir
@@ -353,13 +394,13 @@ def render_brdf(surface: SurfaceProperties, scene: SceneProperties):
 
     # half-angle vector
     half_angle_vec = normalize_vec3(light_dir + view_dir)
-    n_dot_v = _abs(dot3(normal, view_dir))
+    n_dot_v = _abs(_dot3(normal, view_dir))
 
     n_dot_l = saturate(dot3(normal, light_dir))
-    n_dot_h = saturate(dot3(normal, half_angle_vec))
+    n_dot_h = saturate(_dot3(normal, half_angle_vec))
 
     # note: intentionally unclamped
-    l_dot_h = dot3(light_dir, half_angle_vec)
+    l_dot_h = dot3(half_angle_vec, light_dir)
 
     f = fresnel_schlick(f0, l_dot_h)
 
@@ -384,19 +425,19 @@ def test():
     roughness, _, _ = load_as_grayscale("pbr/roughness.png")
     metallic, _, _ = load_as_grayscale("pbr/metallic.png")
 
+    positions = generate_positions(w, h)
     # metallic = torch.full_like(metallic, 0.0)
     # roughness = torch.full_like(roughness, 1.0)
 
-    surface = SurfaceProperties(base_color, normals, roughness, metallic)
+    surface = SurfaceProperties(base_color, normals, roughness, metallic, positions)
 
     # x,y = screen x, y
     # +z = up (from surface to screen)
 
-    light_dir = vec3(1.0, 1.0, 1.0)           # minus light_dir
-    view_dir = vec3(0.0, 0.0, 1.0)
+    light_dir = vec3(1.0, 1.0, 1.0)           # note: neg light_dir!
     light_color = vec3(1.0, 0.95, 0.83)
     ambient_color = vec3(0.02, 0.02, 0.02)
-    scene = SceneProperties(light_dir, view_dir, light_color, ambient_color)
+    scene = SceneProperties(light_dir, light_color, ambient_color)
 
     num_samples = 100
     # generate random light directions
@@ -404,10 +445,10 @@ def test():
     random_light_directions = torch.randn(num_samples, 3)
 
     print("Render")
-    # TODO: replace scene parameters with tensor (N, 9)
-    #       random_view_directions, random_light_directions, random_light_colors
+    # TODO: replace scene parameters with tensor (N, 6)
+    #       random_light_directions, random_light_colors
     #       to render multiple images at once
-    hdr_color = render_brdf(surface, scene)
+    hdr_color = render_brdf(surface, scene, w, h)
 
     print("Save results")
     ldr_color = saturate(linear_to_gamma(hdr_color))
