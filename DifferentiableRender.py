@@ -80,6 +80,24 @@ def normalize_vec3(v):
     return v
 
 
+#
+# A shaped as (N,3)
+# B shaped as (M,3)
+#
+# return sum of every combination of elements A and B  shaped as (M*N, 3)
+def add_as_vec3(a, b):
+    assert_is_tensor_shaped_nx3(a)
+    assert_is_tensor_shaped_nx3(b)
+    # Repeat tensors
+    N = a.shape[0]
+    M = b.shape[0]
+    a_repeated = a.unsqueeze(1).repeat(1, M, 1)  # Shape becomes (N, M, 3)
+    b_repeated = b.unsqueeze(0).repeat(N, 1, 1)  # Shape becomes (N, M, 3)
+    # Add and reshape
+    result = (a_repeated + b_repeated).reshape(-1, 3)
+    return result
+
+
 def vec3(x, y, z):
     return torch.tensor([[x, y, z]]).to(torch.float32)
 
@@ -352,9 +370,15 @@ class SurfaceProperties:
 
 class SceneProperties:
     def __init__(self, light_dir, light_color, ambient_color):
-        assert_is_tensor_shaped_1x3(light_dir)
-        assert_is_tensor_shaped_1x3(light_color)
+        assert_is_tensor_shaped_nx3(light_dir)
+        assert_is_tensor_shaped_nx3(light_color)
         assert_is_tensor_shaped_1x3(ambient_color)
+
+        n_dir = light_dir.shape[0]
+        n_clr = light_color.shape[0]
+        if n_dir != n_clr:
+            raise ValueError
+
         self.light_dir = normalize_vec3(light_dir)
         self.light_color = light_color
         self.ambient_color = ambient_color
@@ -369,17 +393,15 @@ def render_brdf(surface: SurfaceProperties, scene: SceneProperties, w, h):
     f0 = torch.lerp(dielectric_f0, albedo, surface.metallic)
     one_minus_metalness = 1 - surface.metallic
 
-    # virtual camera pos (10 units above the plane)
-    cam_pos = vec3(0.0, 0.0, 10.0)
+    # virtual camera pos (2 units above the plane)
+    cam_pos = vec3(0.0, 0.0, 1.2)
 
     # direction from a pixel to a camera position
-    _view_dir = cam_pos - surface.positions
-
-    view_dir = normalize_vec3(_view_dir)
+    view_dir = normalize_vec3(cam_pos - surface.positions)
 
     save_as_normals(surface.positions, w, h, "out/debug_pos.png")
     save_as_normals(normal, w, h, "out/debug_normals.png")
-    save_as_normals(view_dir, w, h, "out/debug_view_dir.png")
+    save_as_normals(view_dir, w, h, "out/debug_viewdir.png")
     save_as_rgb(linear_to_gamma(albedo), w, h, "out/debug_albedo.png")
     save_as_rgb(linear_to_gamma(f0), w, h, "out/debug_f0.png")
 
@@ -393,6 +415,7 @@ def render_brdf(surface: SurfaceProperties, scene: SceneProperties, w, h):
     roughness = torch.max(roughness, scalar(0.045))
 
     # half-angle vector
+    # half_angle_vec = normalize_vec3(add_as_vec3(light_dir, view_dir))
     half_angle_vec = normalize_vec3(light_dir + view_dir)
     n_dot_v = _abs(_dot3(normal, view_dir))
 
@@ -418,6 +441,12 @@ def reinhard_tonemapper(color):
 
 
 def test():
+    # torch.manual_seed(13)
+    # N = 2
+    # M = 4
+    # A = torch.rand(N, 3)
+    # B = torch.rand(M, 3)
+    # res = add3(A,B)
 
     print("Load Textures")
     base_color, w, h = load_as_rgb("pbr/albedo.png")
@@ -434,9 +463,13 @@ def test():
     # x,y = screen x, y
     # +z = up (from surface to screen)
 
-    light_dir = vec3(1.0, 1.0, 1.0)           # note: neg light_dir!
-    light_color = vec3(1.0, 0.95, 0.83)
-    ambient_color = vec3(0.02, 0.02, 0.02)
+    # num_frames = 5
+    # light_dir = torch.randn(num_frames, 3)
+    # light_color = torch.randn(num_frames, 3)
+
+    light_dir = vec3(0.00, -0.87, 0.5)           # note: neg light_dir!
+    light_color = vec3(1.0, 0.957, 0.839)
+    ambient_color = vec3(0.0, 0.0, 0.0)
     scene = SceneProperties(light_dir, light_color, ambient_color)
 
     num_samples = 100
