@@ -1,11 +1,22 @@
+import math
+
 import torch
 import torchvision
+import torch.nn.functional as F
+from torchvision.transforms import v2
 
 
 def is_tensor(v) -> bool:
     if isinstance(v, torch.Tensor):
         return True
     return False
+
+
+def is_tensor_with_autograd(v) -> bool:
+    if not is_tensor(v):
+        return False
+
+    return v.requires_grad
 
 
 def is_tensor_shaped_1x3(v) -> bool:
@@ -82,6 +93,18 @@ def assert_is_tensor(v):
     raise ValueError
 
 
+def assert_is_tensor_with_autograd(v):
+    if is_tensor_with_autograd(v):
+        return
+    raise ValueError
+
+
+def assert_is_tensor_without_autograd(v):
+    if not is_tensor_with_autograd(v):
+        return
+    raise ValueError
+
+
 def assert_is_tensor_shaped_mxnx3(v):
     if is_tensor_shaped_mxnx3(v):
         return
@@ -112,49 +135,6 @@ def assert_is_tensor_shaped_nx1(v):
     raise ValueError
 
 
-def normalize_vec3(v):
-    assert_is_tensor_shaped_nx3(v)
-    v = v / v.norm(dim=1, keepdim=True)
-    return v
-
-
-# #
-# # A shaped as (N,3)
-# # B shaped as (M,3)
-# #
-# # return sum of every combination of elements A and B  shaped as (N, M, 3)
-# def add_as_vec3(a, b):
-#     assert_is_tensor_shaped_nx3(a)
-#     assert_is_tensor_shaped_nx3(b)
-#     # Repeat tensors
-#     N = a.shape[0]
-#     M = b.shape[0]
-#     a_repeated = a.unsqueeze(1).repeat(1, M, 1)  # Shape becomes (N, M, 3)
-#     b_repeated = b.unsqueeze(0).repeat(N, 1, 1)  # Shape becomes (N, M, 3)
-#     # Add and reshape
-#     _sum = (a_repeated + b_repeated)
-#     return _sum
-
-
-# #
-# # A shaped as (N,3)
-# # B shaped as (M,3)
-# #
-# # return sum of every combination of elements A and B  shaped as (N, M, 1)
-# def dot_as_vec3(a, b):
-#     assert_is_tensor_shaped_nx3(a)
-#     assert_is_tensor_shaped_nx3(b)
-#     # Repeat tensors
-#     N = a.shape[0]
-#     M = b.shape[0]
-#     a_repeated = a.unsqueeze(1).repeat(1, M, 1)  # Shape becomes (N, M, 3)
-#     b_repeated = b.unsqueeze(0).repeat(N, 1, 1)  # Shape becomes (N, M, 3)
-#     # Compute the dot product, result shape is (N, M)
-#     dp_result = (a_repeated * b_repeated).sum(dim=2)
-#     # reshape to (N,M,1)
-#     return dp_result.unsqueeze(2)
-
-
 def vec3(x, y, z):
     return torch.tensor([[x, y, z]]).to(torch.float32)
 
@@ -177,6 +157,12 @@ def promote_2d_to_3d(v, num):
     return v_repeated
 
 
+def normalize_vec3(v):
+    assert_is_tensor_shaped_nx3(v)
+    v = v / v.norm(dim=1, keepdim=True)
+    return v
+
+
 # get tensor shaped as (Z,N,M) slice it along Z axis and return tensor shaped (N,M)
 def slice_3d(v, index):
     assert_is_tensor(v)
@@ -191,56 +177,24 @@ def slice_3d(v, index):
     return v[index]
 
 
-# # take two arrays of vec3 as input
-# #   a = [N,3]
-# #   b = [1,3]
-# # compute dot product between all As and Bs
-# #  and return the result as tensor shaped [N, 1]
-# def dot_vec3(a, b):
-#     assert_is_tensor_shaped_nx3(a)
-#     assert_is_tensor_shaped_1x3(b)
-#     dp = torch.matmul(a, b.t())
-#     num_a = a.shape[0]
-#     num_b = b.shape[0]
-#     if dp.shape[0] != num_a:
-#         raise ValueError
-#     if dp.shape[1] != num_b:
-#         raise ValueError
-#     return dp
-#
-
-# # take two arrays of vec3 as input
-# #   a = [N,3]
-# #   b = [N,3]
-# # compute dot product between all As and Bs
-# #  and return the result as tensor shaped [N, 1]
-# def _dot3(a, b):
-#     assert_is_tensor_shaped_nx3(a)
-#     assert_is_tensor_shaped_nx3(b)
-#     if a.shape[0] != b.shape[0]:
-#         raise ValueError
-#     dp = (a * b).sum(dim=1, keepdim=True)
-#     return dp
-
-
-def __abs(v):
+def _abs(v):
     assert_is_tensor(v)
     return torch.abs(v)
 
 
-def __saturate(v):
+def _saturate(v):
     assert_is_tensor(v)
     return v.clamp(0.0, 1.0)
 
 
-def __normalize_as_vec3(v):
+def _normalize_as_vec3(v):
     assert_is_tensor_shaped_mxnx3(v)
     norms = torch.norm(v, p=2, dim=2, keepdim=True)
     res = v / norms
     return res
 
 
-def __dot_as_vec3(a, b):
+def _dot_as_vec3(a, b):
     assert_is_tensor_shaped_mxnx3(a)
     assert_is_tensor_shaped_mxnx3(b)
     if a.shape[0] != b.shape[0]:
@@ -312,6 +266,37 @@ def save_as_normals(normals, width, height, path):
     torchvision.utils.save_image(raw_image, path)
 
 
+def downsample_image_x2(img, w, h):
+    assert_is_tensor_shaped_nx3(img)
+    img_tensor = img.view(h, w, 3)
+
+    # Reshape img_tensor to (1, 3, H, W) for interpolate
+    img_tensor = img_tensor.permute(2, 0, 1).unsqueeze(0)
+
+    # downsample by a factor of 2
+    downsampled_tensor = F.interpolate(img_tensor, scale_factor=0.5, mode='bilinear',
+                                       align_corners=False, antialias=True)
+
+    # reshape back to (H/2, W/2, 3)
+    downsampled_tensor = downsampled_tensor.squeeze(0).permute(1, 2, 0)
+
+    return downsampled_tensor.view(-1, 3)
+
+
+def _downsample_image_x2(img, w, h):
+    assert_is_tensor_shaped_nx3(img)
+
+    # Reshape to (C, H, W) for torchvision transforms
+    img_tensor = img.view(h, w, 3).permute(2, 0, 1)
+
+    resize_transform = v2.Resize((h // 2, w // 2), antialias=True)
+    downsampled_img = resize_transform(img_tensor)
+
+    # Flatten back to linear shape (W/2 * H/2, 3)
+    flatten = downsampled_img.permute(1, 2, 0).view(-1, 3)
+    return flatten
+
+
 # generate positions inside a "plane" with the following bounds
 # X: -1..1
 # Y: -1..1
@@ -337,7 +322,7 @@ def gamma_to_linear(gamma):
 
 
 def linear_to_gamma(linear):
-    assert_is_tensor_shaped_nx3(linear)
+    assert_is_tensor(linear)
     return pow(linear, 0.45454545)
 
 
@@ -452,6 +437,18 @@ class SurfaceProperties:
         assert_is_tensor_shaped_nx1(metallic)
         assert_is_tensor_shaped_nx3(positions)
 
+        base_color.requires_grad_(True)
+        normal.requires_grad_(True)
+        roughness.requires_grad_(True)
+        metallic.requires_grad_(True)
+        positions.requires_grad_(False)
+
+        assert_is_tensor_with_autograd(base_color)
+        assert_is_tensor_with_autograd(normal)
+        assert_is_tensor_with_autograd(roughness)
+        assert_is_tensor_with_autograd(metallic)
+        assert_is_tensor_without_autograd(positions)
+
         n_clr = base_color.shape[0]
         n_nrm = normal.shape[0]
         n_rgh = roughness.shape[0]
@@ -462,11 +459,21 @@ class SurfaceProperties:
         if n_clr != n_nrm or n_clr != n_rgh or n_clr != n_mtl or n_clr != n_pos:
             raise ValueError
 
-        self.base_color = base_color
+        dielectric_f0 = torch.full_like(base_color, 0.04)
+        f0 = torch.lerp(dielectric_f0, base_color, metallic)
+
+        one_minus_metalness = _saturate(1.0 - metallic)
+
+        self.albedo = base_color
         self.normal = normal
         self.perceptual_roughness = roughness
         self.metallic = metallic
         self.positions = positions
+        self.f0 = f0
+        self.one_minus_metalness = one_minus_metalness
+
+    def parameters(self):
+        return [self.albedo, self.normal, self.perceptual_roughness, self.metallic]
 
 
 class SceneProperties:
@@ -488,23 +495,21 @@ class SceneProperties:
 def render_brdf(surface: SurfaceProperties, scene: SceneProperties, w, h):
 
     # shape(num_pixels, 3)
-    dielectric_f0 = torch.full_like(surface.base_color, 0.04)
-
-    # shape(num_pixels, 3)
-    albedo = gamma_to_linear(surface.base_color)
+    albedo = gamma_to_linear(_saturate(surface.albedo))
 
     # shape(num_pixels, 1)
-    perceptual_roughness = surface.perceptual_roughness
+    perceptual_roughness = _saturate(surface.perceptual_roughness)
 
     # shape(num_pixels, 3)
-    normal = surface.normal
+    normal = normalize_vec3(surface.normal)
 
     # shape(num_pixels, 3)
-    f0 = torch.lerp(dielectric_f0, albedo, surface.metallic)
+    f0 = gamma_to_linear(_saturate(surface.f0))
 
     # shape(num_pixels, 3)
-    one_minus_metalness = 1 - surface.metallic
+    one_minus_metalness = surface.one_minus_metalness
 
+    # TODO: multiple camera positions?
     # virtual camera pos (2 units above the plane)
     # shape(1,3)
     cam_pos = vec3(0.0, 0.0, 1.2)
@@ -528,7 +533,7 @@ def render_brdf(surface: SurfaceProperties, scene: SceneProperties, w, h):
     roughness = torch.max(roughness, scalar(0.045))
 
     num_frames = light_dir.shape[0]
-    num_pixels = dielectric_f0.shape[0]
+    num_pixels = albedo.shape[0]
 
     # promote to 3d tensors
 
@@ -555,17 +560,17 @@ def render_brdf(surface: SurfaceProperties, scene: SceneProperties, w, h):
 
     # half-angle vector
     # shape(num_frames, num_pixels, 3)
-    half_angle_vec = __normalize_as_vec3(light_dir + view_dir)
+    half_angle_vec = _normalize_as_vec3(light_dir + view_dir)
 
     # shape(num_pixels, 3)
-    n_dot_v = __abs(__dot_as_vec3(normal, view_dir))
+    n_dot_v = _abs(_dot_as_vec3(normal, view_dir))
 
     # shape(num_frames, num_pixels, 3)
-    n_dot_l = __saturate(__dot_as_vec3(light_dir, normal))
-    n_dot_h = __saturate(__dot_as_vec3(normal, half_angle_vec))
+    n_dot_l = _saturate(_dot_as_vec3(light_dir, normal))
+    n_dot_h = _saturate(_dot_as_vec3(normal, half_angle_vec))
 
     # note: intentionally unclamped
-    l_dot_h = __dot_as_vec3(half_angle_vec, light_dir)
+    l_dot_h = _dot_as_vec3(half_angle_vec, light_dir)
 
     f = fresnel_schlick(f0, l_dot_h)
 
@@ -579,7 +584,7 @@ def render_brdf(surface: SurfaceProperties, scene: SceneProperties, w, h):
 
 def reinhard_tonemapper(color):
     assert_is_tensor_shaped_nx3(color)
-    return __saturate(color / (1 + color))
+    return _saturate(color / (1 + color))
 
 
 def test():
@@ -625,15 +630,30 @@ def test():
     torch.manual_seed(13)
     random_light_directions = torch.randn(num_samples, 3)
 
-    print("Render")
+    print("Render {0} frames".format(num_frames))
     # shape (num_frames, num_pixels, 3)
     hdr_color = render_brdf(surface, scene, w, h)
+
+    # TODO what to do with fireflies? (random super bright pixels)
+    mdr_color = hdr_color.clamp(0.0, 4.0)
+
+    num_mips = int(math.log2(min(w, h)) + 1)
+    print("Num mips {0}".format(num_mips))
 
     print("Save results")
 
     for frame_num in range(num_frames):
-        ldr_color = __saturate(linear_to_gamma(slice_3d(hdr_color, frame_num)))
-        save_as_rgb(ldr_color, w, h, "out/render_{0}.png".format(frame_num))
+        width = w
+        height = h
+        image = slice_3d(mdr_color, frame_num)
+        for mip_num in range(num_mips-1):
+            img_name = "out/render_{0}_{1}.png".format(frame_num, mip_num)
+            print(img_name)
+            ldr_color = _saturate(linear_to_gamma(image))
+            save_as_rgb(ldr_color, width, height, img_name)
+            image = downsample_image_x2(image, width, height)
+            width = int(width / 2)
+            height = int(height / 2)
 
 
 test()
