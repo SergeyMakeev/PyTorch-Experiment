@@ -6,6 +6,11 @@ import torch.nn.functional as F
 from torchvision.transforms import v2
 
 
+def get_default_device():
+    # device = "cuda" if torch.cuda.is_available() else "cpu"
+    return "cuda"
+
+
 def is_tensor(v) -> bool:
     if isinstance(v, torch.Tensor):
         return True
@@ -136,11 +141,11 @@ def assert_is_tensor_shaped_nx1(v):
 
 
 def vec3(x, y, z):
-    return torch.tensor([[x, y, z]]).to(torch.float32)
+    return torch.tensor([[x, y, z]]).to(dtype=torch.float32, device=get_default_device())
 
 
 def scalar(x):
-    return torch.tensor(x)
+    return torch.tensor(x).to(device=get_default_device())
 
 
 def pi():
@@ -219,7 +224,7 @@ def load_as_rgb(path):
     # num_channels = raw_image.shape[0]
     height = raw_image.shape[1]
     width = raw_image.shape[2]
-    rgb = raw_image.permute(1, 2, 0).reshape(-1, 3).to(torch.float32)
+    rgb = raw_image.permute(1, 2, 0).reshape(-1, 3).to(dtype=torch.float32, device=get_default_device())
     rgb = rgb / 255.0
     return rgb, width, height
 
@@ -230,7 +235,7 @@ def load_as_grayscale(path):
     raw_image = torchvision.io.read_image(path)
     height = raw_image.shape[1]
     width = raw_image.shape[2]
-    rgb = raw_image.permute(1, 2, 0).reshape(-1, 3).to(torch.float32)
+    rgb = raw_image.permute(1, 2, 0).reshape(-1, 3).to(dtype=torch.float32, device=get_default_device())
     # slice to drop last two columns = shape(N,) and then unsqueeze to shape it (N,1)
     grayscale = rgb[:, 0].unsqueeze(1)
     grayscale = grayscale / 255.0
@@ -244,7 +249,7 @@ def load_as_normals(path):
     raw_image = torchvision.io.read_image(path)
     height = raw_image.shape[1]
     width = raw_image.shape[2]
-    normals = raw_image.permute(1, 2, 0).reshape(-1, 3).to(torch.float32)
+    normals = raw_image.permute(1, 2, 0).reshape(-1, 3).to(dtype=torch.float32, device=get_default_device())
     normals = (normals / 255.0) * 2.0 - 1.0
     normals = normalize_vec3(normals)
     return normals, width, height
@@ -492,6 +497,18 @@ class SceneProperties:
         self.ambient_color = ambient_color
 
 
+def compute_loss(images_a, images_b):
+    assert_is_tensor_shaped_mxnx3(images_a)
+    assert_is_tensor_shaped_mxnx3(images_b)
+
+    flat_a = images_a.view(-1)
+    flat_b = images_b.view(-1)
+
+    loss = (flat_a - flat_b).pow(2).mean()
+
+    return loss
+
+
 def render_brdf(surface: SurfaceProperties, scene: SceneProperties, w, h):
 
     # shape(num_pixels, 3)
@@ -588,6 +605,10 @@ def reinhard_tonemapper(color):
 
 
 def test():
+
+    # device = "cpu"
+    torch.set_default_device(get_default_device())
+
     # torch.manual_seed(13)
     # N = 2
     # M = 4
@@ -636,6 +657,9 @@ def test():
 
     # TODO what to do with fireflies? (random super bright pixels)
     mdr_color = hdr_color.clamp(0.0, 4.0)
+
+    loss = compute_loss(hdr_color, mdr_color)
+    loss.backward()
 
     num_mips = int(math.log2(min(w, h)) + 1)
     print("Num mips {0}".format(num_mips))
