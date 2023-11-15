@@ -1,14 +1,15 @@
 import math
-
 import torch
 import torchvision
 import torch.nn.functional as F
 from torchvision.transforms import v2
+import torch.optim as optim
 
 
 def get_default_device():
     # device = "cuda" if torch.cuda.is_available() else "cpu"
     return "cuda"
+    #return "cpu"
 
 
 def is_tensor(v) -> bool:
@@ -192,6 +193,11 @@ def _saturate(v):
     return v.clamp(0.0, 1.0)
 
 
+def _clamp(v, v_min, v_max):
+    assert_is_tensor(v)
+    return v.clamp(v_min, v_max)
+
+
 def _normalize_as_vec3(v):
     assert_is_tensor_shaped_mxnx3(v)
     norms = torch.norm(v, p=2, dim=2, keepdim=True)
@@ -256,12 +262,21 @@ def load_as_normals(path):
 
 
 def save_as_rgb(rgb, width, height, path):
+    assert_is_tensor_shaped_nx3(rgb)
     # reshape
     raw_image = rgb.reshape(height, width, 3).permute(2, 0, 1)
     torchvision.utils.save_image(raw_image, path)
 
 
+def save_as_grayscale(grayscale, width, height, path):
+    assert_is_tensor_shaped_nx1(grayscale)
+    rgb = torch.cat([grayscale, grayscale, grayscale], dim=1)
+    assert_is_tensor_shaped_nx3(rgb)
+    save_as_rgb(rgb, width, height, path)
+
+
 def save_as_normals(normals, width, height, path):
+    assert_is_tensor_shaped_nx3(normals)
     # normalize
     raw_image = normals / normals.norm(dim=1, keepdim=True)
     # reshape
@@ -432,7 +447,7 @@ def v_smith_ggx_correlated(n_dot_l, n_dot_v, roughness):
     # Note: 'n_dot_l *' and 'n_dot_v *' are explicitly reversed
     # "Moving Frostbite to Physically Based Rendering" (Lagarde)
     # https://seblagarde.files.wordpress.com/2015/07/course_notes_moving_frostbite_to_pbr_v32.pdf
-    # Listing 2
+    # Listing 2: BSDF evaluation code.
     vis_v = n_dot_l * torch.sqrt((n_dot_v - a2 * n_dot_v) * n_dot_v + a2)
     vis_l = n_dot_v * torch.sqrt((n_dot_l - a2 * n_dot_l) * n_dot_l + a2)
     return 0.5 / (vis_v + vis_l + 1e-5)
@@ -488,23 +503,23 @@ def brdf_ggx(roughness, n_dot_h, n_dot_v, n_dot_l):
 class SurfaceProperties:
     def __init__(self, base_color: torch.Tensor, normal: torch.Tensor, roughness: torch.Tensor, metallic: torch.Tensor,
                  positions: torch.Tensor):
+        # base_color = base_color.detach()
+        # normal = normal.detach()
+        # roughness = roughness.detach()
+        # metallic = metallic.detach()
+        # positions = positions.detach()
+
+        # base_color.requires_grad_(True)
+        # normal.requires_grad_(True)
+        # roughness.requires_grad_(True)
+        # metallic.requires_grad_(True)
+        # positions.requires_grad_(False)
+
         assert_is_tensor_shaped_nx3(base_color)
         assert_is_tensor_shaped_nx3(normal)
         assert_is_tensor_shaped_nx1(roughness)
         assert_is_tensor_shaped_nx1(metallic)
         assert_is_tensor_shaped_nx3(positions)
-
-        base_color.requires_grad_(True)
-        normal.requires_grad_(True)
-        roughness.requires_grad_(True)
-        metallic.requires_grad_(True)
-        positions.requires_grad_(False)
-
-        assert_is_tensor_with_autograd(base_color)
-        assert_is_tensor_with_autograd(normal)
-        assert_is_tensor_with_autograd(roughness)
-        assert_is_tensor_with_autograd(metallic)
-        assert_is_tensor_without_autograd(positions)
 
         n_clr = base_color.shape[0]
         n_nrm = normal.shape[0]
@@ -517,20 +532,13 @@ class SurfaceProperties:
             raise ValueError
 
         dielectric_f0 = torch.full_like(base_color, 0.04)
-        f0 = torch.lerp(dielectric_f0, base_color, metallic)
-
-        one_minus_metalness = _saturate(1.0 - metallic)
 
         self.albedo = base_color
         self.normal = normal
         self.perceptual_roughness = roughness
         self.metallic = metallic
         self.positions = positions
-        self.f0 = f0
-        self.one_minus_metalness = one_minus_metalness
-
-    def parameters(self):
-        return [self.albedo, self.normal, self.perceptual_roughness, self.metallic]
+        self.dielectric_f0 = dielectric_f0
 
 
 class SceneProperties:
@@ -561,22 +569,62 @@ def compute_loss(images_a, images_b):
     return loss
 
 
+# diffuse only
+def dbg_render_brdf(surface: SurfaceProperties, scene: SceneProperties, w, h):
+
+    # shape(num_pixels, 3)
+    albedo = gamma_to_linear(_saturate(surface.albedo))
+
+    # shape(num_pixels, 3)
+    normal = normalize_vec3(surface.normal)
+
+    # direction from a pixel position to a light position (-light_dir in case of directional light)
+    # shape(num_frames, 3)
+    light_dir = scene.light_dir
+
+    # shape(num_frames, 3)
+    light_color = scene.light_color
+
+    # shape(1,3)
+    ambient_color = scene.ambient_color
+
+    num_frames = light_dir.shape[0]
+    num_pixels = albedo.shape[0]
+
+    # promote to 3d tensors
+    albedo = promote_2d_to_3d(albedo, num_frames)
+    normal = promote_2d_to_3d(normal, num_frames)
+
+    light_dir = light_dir.unsqueeze(1).repeat(1, num_pixels, 1)
+    light_color = light_color.unsqueeze(1).repeat(1, num_pixels, 1)
+
+    # --- brdf ----------
+
+    # shape(num_frames, num_pixels, 3)
+    n_dot_l = _saturate(_dot_as_vec3(light_dir, normal))
+
+    diffuse_term = light_color * n_dot_l
+    color = diffuse_term * albedo + ambient_color
+    return color
+
+
 def render_brdf(surface: SurfaceProperties, scene: SceneProperties, w, h):
 
     # shape(num_pixels, 3)
     albedo = gamma_to_linear(_saturate(surface.albedo))
 
     # shape(num_pixels, 1)
-    perceptual_roughness = _saturate(surface.perceptual_roughness)
+    min_roughness = 0.045
+    perceptual_roughness = _clamp(surface.perceptual_roughness, min_roughness, 1.0)
 
     # shape(num_pixels, 3)
     normal = normalize_vec3(surface.normal)
 
     # shape(num_pixels, 3)
-    f0 = gamma_to_linear(_saturate(surface.f0))
+    f0 = gamma_to_linear(_saturate(torch.lerp(surface.dielectric_f0, surface.albedo, surface.metallic)))
 
     # shape(num_pixels, 3)
-    one_minus_metalness = surface.one_minus_metalness
+    one_minus_metalness = _saturate(1.0 - surface.metallic)
 
     # TODO: multiple camera positions?
     # virtual camera pos (2 units above the plane)
@@ -618,12 +666,12 @@ def render_brdf(surface: SurfaceProperties, scene: SceneProperties, w, h):
 
     # --- debug ----------
 
-    debug_frame_num = 0
-    save_as_normals(surface.positions, w, h, "out/debug_pos.png")
-    save_as_normals(slice_3d(normal, debug_frame_num), w, h, "out/debug_normals.png")
-    save_as_normals(slice_3d(view_dir, debug_frame_num), w, h, "out/debug_viewdir.png")
-    save_as_rgb(linear_to_gamma(slice_3d(albedo, debug_frame_num)), w, h, "out/debug_albedo.png")
-    save_as_rgb(linear_to_gamma(slice_3d(f0, debug_frame_num)), w, h, "out/debug_f0.png")
+    # debug_frame_num = 0
+    # save_as_normals(surface.positions, w, h, "out/debug_pos.png")
+    # save_as_normals(slice_3d(normal, debug_frame_num), w, h, "out/debug_normals.png")
+    # save_as_normals(slice_3d(view_dir, debug_frame_num), w, h, "out/debug_viewdir.png")
+    # save_as_rgb(linear_to_gamma(slice_3d(albedo, debug_frame_num)), w, h, "out/debug_albedo.png")
+    # save_as_rgb(linear_to_gamma(slice_3d(f0, debug_frame_num)), w, h, "out/debug_f0.png")
 
     # --- brdf ----------
 
@@ -632,7 +680,7 @@ def render_brdf(surface: SurfaceProperties, scene: SceneProperties, w, h):
     half_angle_vec = _normalize_as_vec3(light_dir + view_dir)
 
     # shape(num_pixels, 3)
-    n_dot_v = _abs(_dot_as_vec3(normal, view_dir))
+    n_dot_v = _abs(_dot_as_vec3(normal, view_dir)) + 1e-5
 
     # shape(num_frames, num_pixels, 3)
     n_dot_l = _saturate(_dot_as_vec3(light_dir, normal))
@@ -648,7 +696,7 @@ def render_brdf(surface: SurfaceProperties, scene: SceneProperties, w, h):
     diffuse_intensity = diffuse_energy * light_color * n_dot_l
 
     color = diffuse_intensity * albedo + specular + ambient_color
-    return color
+    return color.clamp(0.0, 10.0)
 
 
 def reinhard_tonemapper(color):
@@ -687,33 +735,74 @@ def test():
     normals, _, _ = load_as_normals("pbr/normal.png")
     roughness, _, _ = load_as_grayscale("pbr/roughness.png")
     metallic, _, _ = load_as_grayscale("pbr/metallic.png")
+
+    # save_as_rgb(base_color, w, h, "out/debug_albedo.png")
+    # save_as_normals(normals, w, h, "out/debug_normal.png")
+    # save_as_grayscale(roughness, w, h, "out/debug_roughness.png")
+    # save_as_grayscale(metallic, w, h, "out/debug_metallic.png")
+
     positions = generate_positions(w, h)
     # metallic = torch.full_like(metallic, 0.0)
     # roughness = torch.full_like(roughness, 1.0)
 
-    # downsample source textures (TODO:rewrite this and downsample SurfaceProperties instead?)
-    base_color2 = downsample_rgb_image_x2(base_color, w, h)
-    normals2 = downsample_rgb_image_x2(normals, w, h)
-    roughness2 = downsample_grayscale_image_x2(roughness, w, h)
-    metallic2 = downsample_grayscale_image_x2(metallic, w, h)
-    w2 = int(w / 2)
-    h2 = int(h / 2)
-    positions2 = generate_positions(w2, h2)
-    surface2 = SurfaceProperties(base_color2, normals2, roughness2, metallic2, positions2)
+    num_mips = int(math.log2(min(w, h)) + 1)
+    print("Num mips {0}".format(num_mips))
 
-    surface = SurfaceProperties(base_color, normals, roughness, metallic, positions)
+    texture_mips = [
+        {
+            'base_color': base_color,
+            'normals': normals,
+            'roughness': roughness,
+            'metallic': metallic,
+            'positions': positions,
+            'width': w,
+            'height': h
+         }
+    ]
 
+    print("Downsample source textures")
+    for mip_num in range(num_mips - 1):
+        print("Mip {0}".format(mip_num))
+        _w = texture_mips[-1]['width']
+        _h = texture_mips[-1]['height']
+        _base_color = texture_mips[-1]['base_color']
+        _normals = texture_mips[-1]['normals']
+        _roughness = texture_mips[-1]['roughness']
+        _metallic = texture_mips[-1]['metallic']
+
+        _base_color2 = downsample_rgb_image_x2(_base_color, _w, _h)
+        _normals2 = downsample_rgb_image_x2(_normals, _w, _h)
+        _roughness2 = downsample_grayscale_image_x2(_roughness, _w, _h)
+        _metallic2 = downsample_grayscale_image_x2(_metallic, _w, _h)
+        _w2 = int(_w / 2)
+        _h2 = int(_h / 2)
+        _positions2 = generate_positions(_w2, _h2)
+
+        texture_mips.append(
+            {
+                'base_color': _base_color2,
+                'normals': _normals2,
+                'roughness': _roughness2,
+                'metallic': _metallic2,
+                'positions': _positions2,
+                'width': _w2,
+                'height': _h2
+             }
+        )
+
+    # coord system
     # x,y = screen x, y
     # +z = up (from surface to screen)
+    surface = SurfaceProperties(base_color, normals, roughness, metallic, positions)
 
     num_frames = 5
     torch.manual_seed(13)
-    # light_dir = torch.randn(num_frames, 3)
+    light_dir = torch.randn(num_frames, 3)
     # make sure Z is always positive (hemisphere)
-    # light_dir[:, 2] = torch.abs(light_dir[:, 2])
+    light_dir[:, 2] = torch.abs(light_dir[:, 2])
     # light_color = torch.randn(num_frames, 3)
 
-    light_dir = vec3(0.00, -0.87, 0.5).repeat(num_frames, 1)
+    # light_dir = vec3(0.00, -0.87, 0.5).repeat(num_frames, 1)
     light_color = vec3(1.0, 0.957, 0.839).repeat(num_frames, 1)
 
     # light_dir = vec3(0.00, -0.87, 0.5)           # note: neg light_dir!
@@ -721,77 +810,108 @@ def test():
     ambient_color = vec3(0.0, 0.0, 0.0)
     scene = SceneProperties(light_dir, light_color, ambient_color)
 
-    num_samples = 100
-    # generate random light directions
-    torch.manual_seed(13)
-    random_light_directions = torch.randn(num_samples, 3)
-
     print("Render {0} frames".format(num_frames))
     # shape (num_frames, num_pixels, 3)
     hdr_color = render_brdf(surface, scene, w, h)
 
-    # TODO what to do with fireflies? (random super bright pixels)
-    # mdr_color = hdr_color.clamp(0.0, 4.0)
+    print("Downsample ground truth textures")
 
-    num_mips = int(math.log2(min(w, h)) + 1)
-    print("Num mips {0}".format(num_mips))
+    ground_truth = downsample_frames(hdr_color, w, h, num_mips)
 
-    print("Downsample")
-
-    reference = downsample_frames(hdr_color, w, h, num_mips)
-
-    # reference = [{'image': hdr_color, 'width': w, 'height': h}]
-    # _current = hdr_color
-    # _width = w
-    # _height = h
-    # for mip_num in range(num_mips - 1):
-    #     _current = downsample_rgb_images_x2(_current, _width, _height)
-    #     _width = int(_width / 2)
-    #     _height = int(_height / 2)
-    #     reference.append({'image': _current, 'width': _width, 'height': _height})
-
-    print("Save results (1)")
-    for ref in reference:
-        ref_img = ref['image']
-        width = ref['width']
-        height = ref['height']
-        for frame_num in range(num_frames):
-            img_name = "out/render_{0}_{1}x{2}.png".format(frame_num, width, height)
-            print(img_name)
-            image = slice_3d(ref_img, frame_num)
-            ldr_color = _saturate(linear_to_gamma(image))
-            save_as_rgb(ldr_color, width, height, img_name)
-
-    # print("Save results (2)")
-    # for frame_num in range(num_frames):
-    #     width = w
-    #     height = h
-    #     image = slice_3d(mdr_color, frame_num)
-    #     for mip_num in range(num_mips-1):
-    #         img_name = "out/render_{0}_{1}.png".format(frame_num, mip_num)
+    # print("Save ground truth")
+    # for ref in ground_truth:
+    #     ref_img = ref['image']
+    #     width = ref['width']
+    #     height = ref['height']
+    #     for frame_num in range(num_frames):
+    #         img_name = "out/ground_truth_{0}_{1}x{2}.png".format(frame_num, width, height)
     #         print(img_name)
+    #         image = slice_3d(ref_img, frame_num)
     #         ldr_color = _saturate(linear_to_gamma(image))
     #         save_as_rgb(ldr_color, width, height, img_name)
-    #         image = downsample_rgb_image_x2(image, width, height)
-    #         width = int(width / 2)
-    #         height = int(height / 2)
 
     # render using downsampled source textures
+    current_mip = 1
 
-    hdr_color2 = render_brdf(surface2, scene, w2, h2)
+    _w = texture_mips[current_mip]['width']
+    _h = texture_mips[current_mip]['height']
 
-    loss = compute_loss(reference[1]['image'], hdr_color2)
-    loss.backward()
-    print("loss")
-    print(loss.item())
+    _base_color = texture_mips[current_mip]['base_color'].detach()
+    _base_color.requires_grad_(True)
 
+    _normals = texture_mips[current_mip]['normals'].detach()
+    _normals.requires_grad_(True)
+
+    _roughness = texture_mips[current_mip]['roughness'].detach()
+    _roughness.requires_grad_(True)
+
+    _metallic = texture_mips[current_mip]['metallic'].detach()
+    _metallic.requires_grad_(True)
+
+    _positions = texture_mips[current_mip]['positions']
+
+    # _base_color = torch.full_like(_base_color, 0.01, requires_grad=True)
+    # _normals = torch.full_like(_normals, 0.01, requires_grad=True)
+    # _roughness = torch.full_like(_roughness, 0.01, requires_grad=True)
+    # _metallic = torch.full_like(_metallic, 0.01, requires_grad=True)
+
+    _surface = SurfaceProperties(_base_color, _normals, _roughness, _metallic, _positions)
+
+    ref = ground_truth[current_mip]['image'].detach()
+
+    learning_rate = 0.001
+    assert_is_tensor_with_autograd(_base_color)
+    assert_is_tensor_with_autograd(_normals)
+    assert_is_tensor_with_autograd(_roughness)
+    assert_is_tensor_with_autograd(_metallic)
+    optimizer = optim.Adam([_base_color, _normals, _roughness, _metallic], lr=learning_rate)
+
+    torch.autograd.set_detect_anomaly(True)
+    _hdr_color = None
+
+    print("Save original mip")
+    save_as_rgb(_base_color, _w, _h, "out/_albedo_mip_{0}.png".format(current_mip))
+    save_as_normals(_normals, _w, _h, "out/_normal_mip_{0}.png".format(current_mip))
+    save_as_grayscale(_roughness, _w, _h, "out/_roughness_mip_{0}.png".format(current_mip))
+    save_as_grayscale(_metallic, _w, _h, "out/_metallic_mip_{0}.png".format(current_mip))
+
+    for t in range(5000):
+        _hdr_color = render_brdf(_surface, scene, _w, _h)
+
+        loss = compute_loss(ref, _hdr_color)
+
+        if t % 500 == 0:
+            print(t, loss.item())
+            for frame_num in range(num_frames):
+                image2 = slice_3d(_hdr_color, frame_num)
+                img_name = "out/steps/step{3}_mip_render_{0}_{1}x{2}.png".format(frame_num, _w, _h, t)
+                print(img_name)
+                ldr_color2 = _saturate(linear_to_gamma(image2))
+                save_as_rgb(ldr_color2, _w, _h, img_name)
+
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()
+
+    print("Save resulting mip")
+    save_as_rgb(_base_color, _w, _h, "out/albedo_mip_{0}.png".format(current_mip))
+    save_as_normals(_normals, _w, _h, "out/normal_mip_{0}.png".format(current_mip))
+    save_as_grayscale(_roughness, _w, _h, "out/roughness_mip_{0}.png".format(current_mip))
+    save_as_grayscale(_metallic, _w, _h, "out/metallic_mip_{0}.png".format(current_mip))
+
+    gt_hdr_color = ground_truth[current_mip]['image']
     for frame_num in range(num_frames):
-        image2 = slice_3d(hdr_color2, frame_num)
-        img_name = "out/render_div2_{0}.png".format(frame_num)
+        image1 = slice_3d(gt_hdr_color, frame_num)
+        img_name = "out/steps/gt_mip_render_{0}_{1}x{2}.png".format(frame_num, _w, _h)
+        print(img_name)
+        ldr_color1 = _saturate(linear_to_gamma(image1))
+        save_as_rgb(ldr_color1, _w, _h, img_name)
+
+        image2 = slice_3d(_hdr_color, frame_num)
+        img_name = "out/steps/mip_render_{0}_{1}x{2}.png".format(frame_num, _w, _h)
         print(img_name)
         ldr_color2 = _saturate(linear_to_gamma(image2))
-        save_as_rgb(ldr_color2, w2, h2, img_name)
-
+        save_as_rgb(ldr_color2, _w, _h, img_name)
 
 
 
