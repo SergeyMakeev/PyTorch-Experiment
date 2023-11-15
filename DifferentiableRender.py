@@ -271,11 +271,62 @@ def save_as_normals(normals, width, height, path):
     torchvision.utils.save_image(raw_image, path)
 
 
-def downsample_image_x2(img, w, h):
+def downsample_rgb_images_x2(images, w, h):
+    assert_is_tensor_shaped_mxnx3(images)
+
+    num_images = images.shape[0]
+
+    # reshape to (num_images, H, W, 3)
+    reshaped_tensor = images.view(num_images, h, w, 3)
+
+    # initialize a list to hold downsampled images
+    downsampled_images = []
+
+    # downsample each image
+    for img in reshaped_tensor:
+        # add batch dimension and permute to (1, 3, H, W)
+        img = img.permute(2, 0, 1).unsqueeze(0)
+
+        # downsample
+        downsampled_img = F.interpolate(img, scale_factor=0.5, mode='bilinear',
+                                        align_corners=False, antialias=True)
+
+        # remove batch dimension and permute back to (H/2, W/2, 3)
+        downsampled_img = downsampled_img.squeeze(0).permute(1, 2, 0)
+
+        # flatten and add to the list
+        downsampled_images.append(downsampled_img.view(-1, 3))
+
+    # concatenate all downsampled images into a single tensor
+    output_tensor = torch.stack(downsampled_images)
+    return output_tensor
+
+
+def downsample_grayscale_image_x2(img, w, h):
+    assert_is_tensor_shaped_nx1(img)
+
+    img_tensor = img.view(h, w, 1)
+    # reshape img_tensor to (1, 1, H, W)
+    img_tensor = img_tensor.permute(2, 0, 1).unsqueeze(0)
+
+    # downsample by a factor of 2
+    downsampled_tensor = F.interpolate(img_tensor, scale_factor=0.5, mode='bilinear',
+                                       align_corners=False, antialias=True)
+
+    # reshape back to (H/2, W/2, 1)
+    downsampled_tensor = downsampled_tensor.squeeze(0).permute(1, 2, 0)
+
+    # flatten the tensor to (W/2*H/2, 1)
+    flattened_tensor = downsampled_tensor.view(-1, 1)
+
+    return flattened_tensor
+
+
+def downsample_rgb_image_x2(img, w, h):
     assert_is_tensor_shaped_nx3(img)
     img_tensor = img.view(h, w, 3)
 
-    # Reshape img_tensor to (1, 3, H, W) for interpolate
+    # reshape img_tensor to (1, 3, H, W) for interpolate
     img_tensor = img_tensor.permute(2, 0, 1).unsqueeze(0)
 
     # downsample by a factor of 2
@@ -288,7 +339,8 @@ def downsample_image_x2(img, w, h):
     return downsampled_tensor.view(-1, 3)
 
 
-def _downsample_image_x2(img, w, h):
+# alternative approach
+def _downsample_rgb_image_x2(img, w, h):
     assert_is_tensor_shaped_nx3(img)
 
     # Reshape to (C, H, W) for torchvision transforms
@@ -309,7 +361,7 @@ def _downsample_image_x2(img, w, h):
 def generate_positions(width, height):
     x = torch.linspace(-1, 1, width)
     y = torch.linspace(-1, 1, height)
-    xx, yy = torch.meshgrid(x, y)
+    xx, yy = torch.meshgrid(x, y, indexing="ij")
     zz = torch.zeros_like(xx)
     points = torch.stack((xx.t(), yy.t(), zz.t()), dim=-1)
     points = points.reshape(-1, 3)
@@ -604,6 +656,20 @@ def reinhard_tonemapper(color):
     return _saturate(color / (1 + color))
 
 
+def downsample_frames(hdr_color, w, h, num_mips):
+    reference = [{'image': hdr_color, 'width': w, 'height': h}]
+    _current = hdr_color
+    _width = w
+    _height = h
+    for mip_num in range(num_mips - 1):
+        _current = downsample_rgb_images_x2(_current, _width, _height)
+        _width = int(_width / 2)
+        _height = int(_height / 2)
+        reference.append({'image': _current, 'width': _width, 'height': _height})
+
+    return reference
+
+
 def test():
 
     # device = "cpu"
@@ -621,10 +687,19 @@ def test():
     normals, _, _ = load_as_normals("pbr/normal.png")
     roughness, _, _ = load_as_grayscale("pbr/roughness.png")
     metallic, _, _ = load_as_grayscale("pbr/metallic.png")
-
     positions = generate_positions(w, h)
     # metallic = torch.full_like(metallic, 0.0)
     # roughness = torch.full_like(roughness, 1.0)
+
+    # downsample source textures (TODO:rewrite this and downsample SurfaceProperties instead?)
+    base_color2 = downsample_rgb_image_x2(base_color, w, h)
+    normals2 = downsample_rgb_image_x2(normals, w, h)
+    roughness2 = downsample_grayscale_image_x2(roughness, w, h)
+    metallic2 = downsample_grayscale_image_x2(metallic, w, h)
+    w2 = int(w / 2)
+    h2 = int(h / 2)
+    positions2 = generate_positions(w2, h2)
+    surface2 = SurfaceProperties(base_color2, normals2, roughness2, metallic2, positions2)
 
     surface = SurfaceProperties(base_color, normals, roughness, metallic, positions)
 
@@ -656,28 +731,69 @@ def test():
     hdr_color = render_brdf(surface, scene, w, h)
 
     # TODO what to do with fireflies? (random super bright pixels)
-    mdr_color = hdr_color.clamp(0.0, 4.0)
-
-    loss = compute_loss(hdr_color, mdr_color)
-    loss.backward()
+    # mdr_color = hdr_color.clamp(0.0, 4.0)
 
     num_mips = int(math.log2(min(w, h)) + 1)
     print("Num mips {0}".format(num_mips))
 
-    print("Save results")
+    print("Downsample")
 
-    for frame_num in range(num_frames):
-        width = w
-        height = h
-        image = slice_3d(mdr_color, frame_num)
-        for mip_num in range(num_mips-1):
-            img_name = "out/render_{0}_{1}.png".format(frame_num, mip_num)
+    reference = downsample_frames(hdr_color, w, h, num_mips)
+
+    # reference = [{'image': hdr_color, 'width': w, 'height': h}]
+    # _current = hdr_color
+    # _width = w
+    # _height = h
+    # for mip_num in range(num_mips - 1):
+    #     _current = downsample_rgb_images_x2(_current, _width, _height)
+    #     _width = int(_width / 2)
+    #     _height = int(_height / 2)
+    #     reference.append({'image': _current, 'width': _width, 'height': _height})
+
+    print("Save results (1)")
+    for ref in reference:
+        ref_img = ref['image']
+        width = ref['width']
+        height = ref['height']
+        for frame_num in range(num_frames):
+            img_name = "out/render_{0}_{1}x{2}.png".format(frame_num, width, height)
             print(img_name)
+            image = slice_3d(ref_img, frame_num)
             ldr_color = _saturate(linear_to_gamma(image))
             save_as_rgb(ldr_color, width, height, img_name)
-            image = downsample_image_x2(image, width, height)
-            width = int(width / 2)
-            height = int(height / 2)
+
+    # print("Save results (2)")
+    # for frame_num in range(num_frames):
+    #     width = w
+    #     height = h
+    #     image = slice_3d(mdr_color, frame_num)
+    #     for mip_num in range(num_mips-1):
+    #         img_name = "out/render_{0}_{1}.png".format(frame_num, mip_num)
+    #         print(img_name)
+    #         ldr_color = _saturate(linear_to_gamma(image))
+    #         save_as_rgb(ldr_color, width, height, img_name)
+    #         image = downsample_rgb_image_x2(image, width, height)
+    #         width = int(width / 2)
+    #         height = int(height / 2)
+
+    # render using downsampled source textures
+
+    hdr_color2 = render_brdf(surface2, scene, w2, h2)
+
+    loss = compute_loss(reference[1]['image'], hdr_color2)
+    loss.backward()
+    print("loss")
+    print(loss.item())
+
+    for frame_num in range(num_frames):
+        image2 = slice_3d(hdr_color2, frame_num)
+        img_name = "out/render_div2_{0}.png".format(frame_num)
+        print(img_name)
+        ldr_color2 = _saturate(linear_to_gamma(image2))
+        save_as_rgb(ldr_color2, w2, h2, img_name)
+
+
+
 
 
 test()
