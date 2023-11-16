@@ -230,6 +230,12 @@ def load_as_rgb(path):
     # num_channels = raw_image.shape[0]
     height = raw_image.shape[1]
     width = raw_image.shape[2]
+    depth = raw_image.shape[0]
+
+    # drop alpha if needed
+    if depth == 4:
+        raw_image = raw_image[0:3]
+
     rgb = raw_image.permute(1, 2, 0).reshape(-1, 3).to(dtype=torch.float32, device=get_default_device())
     rgb = rgb / 255.0
     return rgb, width, height
@@ -241,6 +247,12 @@ def load_as_grayscale(path):
     raw_image = torchvision.io.read_image(path)
     height = raw_image.shape[1]
     width = raw_image.shape[2]
+    depth = raw_image.shape[0]
+
+    # drop alpha if needed
+    if depth == 4:
+        raw_image = raw_image[0:3]
+
     rgb = raw_image.permute(1, 2, 0).reshape(-1, 3).to(dtype=torch.float32, device=get_default_device())
     # slice to drop last two columns = shape(N,) and then unsqueeze to shape it (N,1)
     grayscale = rgb[:, 0].unsqueeze(1)
@@ -255,6 +267,12 @@ def load_as_normals(path):
     raw_image = torchvision.io.read_image(path)
     height = raw_image.shape[1]
     width = raw_image.shape[2]
+    depth = raw_image.shape[0]
+
+    # drop alpha if needed
+    if depth == 4:
+        raw_image = raw_image[0:3]
+
     normals = raw_image.permute(1, 2, 0).reshape(-1, 3).to(dtype=torch.float32, device=get_default_device())
     normals = (normals / 255.0) * 2.0 - 1.0
     normals = normalize_vec3(normals)
@@ -722,7 +740,7 @@ def downsample_frames(hdr_color, w, h, num_mips):
     return reference
 
 
-def test():
+def test(current_mip, num_iterations=1500):
 
     # device = "cpu"
     torch.set_default_device(get_default_device())
@@ -871,17 +889,16 @@ def test():
 
     ground_truth = downsample_frames(hdr_color, w, h, num_mips)
 
-
-    # print("Save ground truth")
-    # for frame_num in range(num_frames):
-    #     image1 = slice_3d(hdr_color, frame_num)
-    #     img_name = "out/gt/gt_render_{0}.png".format(frame_num)
-    #     print(img_name)
-    #     # ldr_color1 = _saturate(linear_to_gamma(image1))
-    #     save_as_rgb(image1, w, h, img_name)
+    if False:
+        print("Save ground truth")
+        for frame_num in range(num_frames):
+            image1 = slice_3d(hdr_color, frame_num)
+            img_name = "out/gt/gt_render_{0}.png".format(frame_num)
+            print(img_name)
+            # ldr_color1 = _saturate(linear_to_gamma(image1))
+            save_as_rgb(image1, w, h, img_name)
 
     # render using downsampled source textures
-    current_mip = 11
 
     _w = texture_mips[current_mip]['width']
     _h = texture_mips[current_mip]['height']
@@ -941,7 +958,7 @@ def test():
             # ldr_color1 = _saturate(linear_to_gamma(image1))
             save_as_rgb(image1, gt_w, gt_h, img_name)
 
-    for t in range(1500):
+    for t in range(num_iterations):
         _hdr_color = render_brdf(_surface, scene, _w, _h)
 
         loss = compute_loss(ref, _hdr_color)
@@ -979,6 +996,4 @@ def test():
         save_as_rgb(image2, _w, _h, img_name)
 
 
-
-
-test()
+test(11, 3000)
