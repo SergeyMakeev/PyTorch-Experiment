@@ -304,7 +304,7 @@ def downsample_rgb_images_x2(images, w, h):
 
         # downsample
         downsampled_img = F.interpolate(img, scale_factor=0.5, mode='bilinear',
-                                        align_corners=False, antialias=True)
+                                        align_corners=False)
 
         # remove batch dimension and permute back to (H/2, W/2, 3)
         downsampled_img = downsampled_img.squeeze(0).permute(1, 2, 0)
@@ -326,7 +326,7 @@ def downsample_grayscale_image_x2(img, w, h):
 
     # downsample by a factor of 2
     downsampled_tensor = F.interpolate(img_tensor, scale_factor=0.5, mode='bilinear',
-                                       align_corners=False, antialias=True)
+                                       align_corners=False)
 
     # reshape back to (H/2, W/2, 1)
     downsampled_tensor = downsampled_tensor.squeeze(0).permute(1, 2, 0)
@@ -346,7 +346,7 @@ def downsample_rgb_image_x2(img, w, h):
 
     # downsample by a factor of 2
     downsampled_tensor = F.interpolate(img_tensor, scale_factor=0.5, mode='bilinear',
-                                       align_corners=False, antialias=True)
+                                       align_corners=False)
 
     # reshape back to (H/2, W/2, 3)
     downsampled_tensor = downsampled_tensor.squeeze(0).permute(1, 2, 0)
@@ -355,18 +355,18 @@ def downsample_rgb_image_x2(img, w, h):
 
 
 # alternative approach
-def _downsample_rgb_image_x2(img, w, h):
-    assert_is_tensor_shaped_nx3(img)
-
-    # Reshape to (C, H, W) for torchvision transforms
-    img_tensor = img.view(h, w, 3).permute(2, 0, 1)
-
-    resize_transform = v2.Resize((h // 2, w // 2), antialias=True)
-    downsampled_img = resize_transform(img_tensor)
-
-    # Flatten back to linear shape (W/2 * H/2, 3)
-    flatten = downsampled_img.permute(1, 2, 0).view(-1, 3)
-    return flatten
+# def _downsample_rgb_image_x2(img, w, h):
+#     assert_is_tensor_shaped_nx3(img)
+#
+#     # Reshape to (C, H, W) for torchvision transforms
+#     img_tensor = img.view(h, w, 3).permute(2, 0, 1)
+#
+#     resize_transform = v2.Resize((h // 2, w // 2), antialias=True)
+#     downsampled_img = resize_transform(img_tensor)
+#
+#     # Flatten back to linear shape (W/2 * H/2, 3)
+#     flatten = downsampled_img.permute(1, 2, 0).view(-1, 3)
+#     return flatten
 
 
 # generate positions inside a "plane" with the following bounds
@@ -395,7 +395,11 @@ def gamma_to_linear(gamma):
 
 def linear_to_gamma(linear):
     assert_is_tensor(linear)
-    return pow(linear, 0.45454545)
+    linear_clamped = linear.clamp(0.0039, 100.0)
+    res = torch.pow(linear_clamped, 0.45454545)
+    # if torch.isnan(res).any():
+    #     print("NAN!!!")
+    return res
 
 
 def perceptual_roughness_to_roughness(perceptual_roughness):
@@ -696,7 +700,7 @@ def render_brdf(surface: SurfaceProperties, scene: SceneProperties, w, h):
     diffuse_intensity = diffuse_energy * light_color * n_dot_l
 
     color = diffuse_intensity * albedo + specular + ambient_color
-    return color.clamp(0.0, 10.0)
+    return _saturate(linear_to_gamma(color))
 
 
 def reinhard_tonemapper(color):
@@ -771,7 +775,7 @@ def test():
         _metallic = texture_mips[-1]['metallic']
 
         _base_color2 = downsample_rgb_image_x2(_base_color, _w, _h)
-        _normals2 = downsample_rgb_image_x2(_normals, _w, _h)
+        _normals2 = normalize_vec3(downsample_rgb_image_x2(_normals, _w, _h))
         _roughness2 = downsample_grayscale_image_x2(_roughness, _w, _h)
         _metallic2 = downsample_grayscale_image_x2(_metallic, _w, _h)
         _w2 = int(_w / 2)
@@ -796,16 +800,28 @@ def test():
     surface = SurfaceProperties(base_color, normals, roughness, metallic, positions)
 
     num_frames = 5
-    torch.manual_seed(13)
-    light_dir = torch.randn(num_frames, 3)
+    torch.manual_seed(13423423)
+    # light_dir = torch.randn(num_frames, 3)
     # make sure Z is always positive (hemisphere)
-    light_dir[:, 2] = torch.abs(light_dir[:, 2])
+    # light_dir[:, 2] = torch.abs(light_dir[:, 2])
+    # light_dir = normalize_vec3(light_dir)
     # light_color = torch.randn(num_frames, 3)
 
     # light_dir = vec3(0.00, -0.87, 0.5).repeat(num_frames, 1)
     light_color = vec3(1.0, 0.957, 0.839).repeat(num_frames, 1)
 
     # light_dir = vec3(0.00, -0.87, 0.5)           # note: neg light_dir!
+
+    light_dir = torch.tensor([
+        [0.00, -0.87, 0.5],
+        [0.0, 0.77, 0.64],
+        [-0.58, 0.73, 0.34],
+        [0.72, 0.59, 0.38],
+        [0.19, 0.12, 0.98]
+    ])
+
+    light_dir = normalize_vec3(light_dir)
+
     # light_color = vec3(1.0, 0.957, 0.839)
     ambient_color = vec3(0.0, 0.0, 0.0)
     scene = SceneProperties(light_dir, light_color, ambient_color)
@@ -831,7 +847,7 @@ def test():
     #         save_as_rgb(ldr_color, width, height, img_name)
 
     # render using downsampled source textures
-    current_mip = 1
+    current_mip = 6
 
     _w = texture_mips[current_mip]['width']
     _h = texture_mips[current_mip]['height']
@@ -859,14 +875,17 @@ def test():
 
     ref = ground_truth[current_mip]['image'].detach()
 
-    learning_rate = 0.001
     assert_is_tensor_with_autograd(_base_color)
     assert_is_tensor_with_autograd(_normals)
     assert_is_tensor_with_autograd(_roughness)
     assert_is_tensor_with_autograd(_metallic)
+    learning_rate = 0.005
     optimizer = optim.Adam([_base_color, _normals, _roughness, _metallic], lr=learning_rate)
 
-    torch.autograd.set_detect_anomaly(True)
+    # learning_rate = 1.0
+    # optimizer = optim.SGD([_base_color, _normals, _roughness, _metallic], lr=learning_rate)
+
+    #torch.autograd.set_detect_anomaly(True)
     _hdr_color = None
 
     print("Save original mip")
@@ -875,43 +894,55 @@ def test():
     save_as_grayscale(_roughness, _w, _h, "out/_roughness_mip_{0}.png".format(current_mip))
     save_as_grayscale(_metallic, _w, _h, "out/_metallic_mip_{0}.png".format(current_mip))
 
-    for t in range(5000):
+    for mip_num in range(num_mips - 1):
+        gt_hdr_color = ground_truth[mip_num]['image']
+        gt_w = ground_truth[mip_num]['width']
+        gt_h = ground_truth[mip_num]['height']
+        #for frame_num in range(num_frames):
+        if True:
+            frame_num = 0
+            image1 = slice_3d(gt_hdr_color, frame_num)
+            img_name = "out/steps/gt_mip_render_{0}_{1}x{2}.png".format(frame_num, gt_w, gt_h)
+            print(img_name)
+            # ldr_color1 = _saturate(linear_to_gamma(image1))
+            save_as_rgb(image1, gt_w, gt_h, img_name)
+
+    for t in range(1500):
         _hdr_color = render_brdf(_surface, scene, _w, _h)
 
         loss = compute_loss(ref, _hdr_color)
 
-        if t % 500 == 0:
+        if t % 100 == 0:
             print(t, loss.item())
-            for frame_num in range(num_frames):
+
+        if t % 1000 == 0:
+            #for frame_num in range(num_frames):
+            if True:
+                frame_num = 0
                 image2 = slice_3d(_hdr_color, frame_num)
                 img_name = "out/steps/step{3}_mip_render_{0}_{1}x{2}.png".format(frame_num, _w, _h, t)
                 print(img_name)
-                ldr_color2 = _saturate(linear_to_gamma(image2))
-                save_as_rgb(ldr_color2, _w, _h, img_name)
+                #ldr_color2 = _saturate(linear_to_gamma(image2))
+                save_as_rgb(image2, _w, _h, img_name)
 
         loss.backward()
         optimizer.step()
         optimizer.zero_grad()
 
     print("Save resulting mip")
-    save_as_rgb(_base_color, _w, _h, "out/albedo_mip_{0}.png".format(current_mip))
-    save_as_normals(_normals, _w, _h, "out/normal_mip_{0}.png".format(current_mip))
-    save_as_grayscale(_roughness, _w, _h, "out/roughness_mip_{0}.png".format(current_mip))
-    save_as_grayscale(_metallic, _w, _h, "out/metallic_mip_{0}.png".format(current_mip))
+    save_as_rgb(_saturate(_base_color), _w, _h, "out/albedo_mip_{0}.png".format(current_mip))
+    save_as_normals(normalize_vec3(_normals), _w, _h, "out/normal_mip_{0}.png".format(current_mip))
+    save_as_grayscale(_saturate(_roughness), _w, _h, "out/roughness_mip_{0}.png".format(current_mip))
+    save_as_grayscale(_saturate(_metallic), _w, _h, "out/metallic_mip_{0}.png".format(current_mip))
 
-    gt_hdr_color = ground_truth[current_mip]['image']
-    for frame_num in range(num_frames):
-        image1 = slice_3d(gt_hdr_color, frame_num)
-        img_name = "out/steps/gt_mip_render_{0}_{1}x{2}.png".format(frame_num, _w, _h)
-        print(img_name)
-        ldr_color1 = _saturate(linear_to_gamma(image1))
-        save_as_rgb(ldr_color1, _w, _h, img_name)
-
+    #for frame_num in range(num_frames):
+    if True:
+        frame_num = 0
         image2 = slice_3d(_hdr_color, frame_num)
         img_name = "out/steps/mip_render_{0}_{1}x{2}.png".format(frame_num, _w, _h)
         print(img_name)
-        ldr_color2 = _saturate(linear_to_gamma(image2))
-        save_as_rgb(ldr_color2, _w, _h, img_name)
+        #ldr_color2 = _saturate(linear_to_gamma(image2))
+        save_as_rgb(image2, _w, _h, img_name)
 
 
 
