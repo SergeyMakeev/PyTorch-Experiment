@@ -740,6 +740,13 @@ def test():
     roughness, _, _ = load_as_grayscale("pbr/roughness.png")
     metallic, _, _ = load_as_grayscale("pbr/metallic.png")
 
+    print("Save mip0 (original)")
+    save_as_rgb(_saturate(base_color), w, h, "out/albedo_mip_0.png")
+    save_as_normals(normalize_vec3(normals), w, h, "out/normal_mip_0.png")
+    save_as_grayscale(_saturate(roughness), w, h, "out/roughness_mip_0.png")
+    save_as_grayscale(_saturate(metallic), w, h, "out/metallic_mip_0.png")
+
+
     # save_as_rgb(base_color, w, h, "out/debug_albedo.png")
     # save_as_normals(normals, w, h, "out/debug_normal.png")
     # save_as_grayscale(roughness, w, h, "out/debug_roughness.png")
@@ -799,7 +806,7 @@ def test():
     # +z = up (from surface to screen)
     surface = SurfaceProperties(base_color, normals, roughness, metallic, positions)
 
-    num_frames = 5
+    num_frames = 16
     torch.manual_seed(13423423)
     # light_dir = torch.randn(num_frames, 3)
     # make sure Z is always positive (hemisphere)
@@ -808,22 +815,52 @@ def test():
     # light_color = torch.randn(num_frames, 3)
 
     # light_dir = vec3(0.00, -0.87, 0.5).repeat(num_frames, 1)
-    light_color = vec3(1.0, 0.957, 0.839).repeat(num_frames, 1)
+    #light_color = vec3(1.0, 0.957, 0.839).repeat(num_frames, 1)
+
+    light_color = torch.tensor([
+        [1.0, 0.957, 0.839],
+        [1.0, 0.957, 0.839],
+        [1.0, 0.957, 0.839],
+        [1.0, 0.957, 0.839],
+        [1.0, 0.957, 0.839],
+        [1.0, 0.0, 0.839],
+        [1.0, 0.957, 0],
+        [0, 0.957, 0.839],
+        [1.0, 0.957, 0.839],
+        [1.0, 0.957, 0.839],
+        [1.0, 0.957, 0.839],
+        [1.0, 1.0, 1.0],
+        [0.5, 0.5, 0.5],
+        [1.0, 0.957, 0.839],
+        [1.0, 0.957, 0.839],
+        [1.0, 0.957, 0.839],
+    ])
 
     # light_dir = vec3(0.00, -0.87, 0.5)           # note: neg light_dir!
 
     light_dir = torch.tensor([
         [0.00, -0.87, 0.5],
+        [0.00, 0.87, 0.5],
         [0.0, 0.77, 0.64],
+        [0.0, -0.77, 0.64],
         [-0.58, 0.73, 0.34],
+        [-0.58, -0.73, 0.34],
+        [0.58, 0.73, 0.34],
+        [0.58, -0.73, 0.34],
         [0.72, 0.59, 0.38],
-        [0.19, 0.12, 0.98]
+        [-0.72, 0.59, 0.38],
+        [0.72, -0.59, 0.38],
+        [-0.72, -0.59, 0.38],
+        [0.19, 0.12, 0.98],
+        [-0.19, 0.12, 0.98],
+        [0.19, -0.12, 0.98],
+        [-0.19, -0.12, 0.98]
     ])
 
     light_dir = normalize_vec3(light_dir)
 
     # light_color = vec3(1.0, 0.957, 0.839)
-    ambient_color = vec3(0.0, 0.0, 0.0)
+    ambient_color = vec3(0.02, 0.02, 0.02)
     scene = SceneProperties(light_dir, light_color, ambient_color)
 
     print("Render {0} frames".format(num_frames))
@@ -834,20 +871,17 @@ def test():
 
     ground_truth = downsample_frames(hdr_color, w, h, num_mips)
 
+
     # print("Save ground truth")
-    # for ref in ground_truth:
-    #     ref_img = ref['image']
-    #     width = ref['width']
-    #     height = ref['height']
-    #     for frame_num in range(num_frames):
-    #         img_name = "out/ground_truth_{0}_{1}x{2}.png".format(frame_num, width, height)
-    #         print(img_name)
-    #         image = slice_3d(ref_img, frame_num)
-    #         ldr_color = _saturate(linear_to_gamma(image))
-    #         save_as_rgb(ldr_color, width, height, img_name)
+    # for frame_num in range(num_frames):
+    #     image1 = slice_3d(hdr_color, frame_num)
+    #     img_name = "out/gt/gt_render_{0}.png".format(frame_num)
+    #     print(img_name)
+    #     # ldr_color1 = _saturate(linear_to_gamma(image1))
+    #     save_as_rgb(image1, w, h, img_name)
 
     # render using downsampled source textures
-    current_mip = 6
+    current_mip = 11
 
     _w = texture_mips[current_mip]['width']
     _h = texture_mips[current_mip]['height']
