@@ -253,6 +253,9 @@ def load_as_grayscale(path):
     if depth == 4:
         raw_image = raw_image[0:3]
 
+    if depth == 1:
+        raw_image = torch.cat([raw_image, raw_image, raw_image], dim=1)
+
     rgb = raw_image.permute(1, 2, 0).reshape(-1, 3).to(dtype=torch.float32, device=get_default_device())
     # slice to drop last two columns = shape(N,) and then unsqueeze to shape it (N,1)
     grayscale = rgb[:, 0].unsqueeze(1)
@@ -740,7 +743,7 @@ def downsample_frames(hdr_color, w, h, num_mips):
     return reference
 
 
-def test(current_mip, num_iterations=1500):
+def test(num_iterations=1500):
 
     # device = "cpu"
     torch.set_default_device(get_default_device())
@@ -898,53 +901,6 @@ def test(current_mip, num_iterations=1500):
             # ldr_color1 = _saturate(linear_to_gamma(image1))
             save_as_rgb(image1, w, h, img_name)
 
-    # render using downsampled source textures
-
-    _w = texture_mips[current_mip]['width']
-    _h = texture_mips[current_mip]['height']
-
-    _base_color = texture_mips[current_mip]['base_color'].detach()
-    _base_color.requires_grad_(True)
-
-    _normals = texture_mips[current_mip]['normals'].detach()
-    _normals.requires_grad_(True)
-
-    _roughness = texture_mips[current_mip]['roughness'].detach()
-    _roughness.requires_grad_(True)
-
-    _metallic = texture_mips[current_mip]['metallic'].detach()
-    _metallic.requires_grad_(True)
-
-    _positions = texture_mips[current_mip]['positions']
-
-    # _base_color = torch.full_like(_base_color, 0.01, requires_grad=True)
-    # _normals = torch.full_like(_normals, 0.01, requires_grad=True)
-    # _roughness = torch.full_like(_roughness, 0.01, requires_grad=True)
-    # _metallic = torch.full_like(_metallic, 0.01, requires_grad=True)
-
-    _surface = SurfaceProperties(_base_color, _normals, _roughness, _metallic, _positions)
-
-    ref = ground_truth[current_mip]['image'].detach()
-
-    assert_is_tensor_with_autograd(_base_color)
-    assert_is_tensor_with_autograd(_normals)
-    assert_is_tensor_with_autograd(_roughness)
-    assert_is_tensor_with_autograd(_metallic)
-    learning_rate = 0.005
-    optimizer = optim.Adam([_base_color, _normals, _roughness, _metallic], lr=learning_rate)
-
-    # learning_rate = 1.0
-    # optimizer = optim.SGD([_base_color, _normals, _roughness, _metallic], lr=learning_rate)
-
-    #torch.autograd.set_detect_anomaly(True)
-    _hdr_color = None
-
-    print("Save original mip")
-    save_as_rgb(_base_color, _w, _h, "out/_albedo_mip_{0}.png".format(current_mip))
-    save_as_normals(_normals, _w, _h, "out/_normal_mip_{0}.png".format(current_mip))
-    save_as_grayscale(_roughness, _w, _h, "out/_roughness_mip_{0}.png".format(current_mip))
-    save_as_grayscale(_metallic, _w, _h, "out/_metallic_mip_{0}.png".format(current_mip))
-
     for mip_num in range(num_mips - 1):
         gt_hdr_color = ground_truth[mip_num]['image']
         gt_w = ground_truth[mip_num]['width']
@@ -958,33 +914,91 @@ def test(current_mip, num_iterations=1500):
             # ldr_color1 = _saturate(linear_to_gamma(image1))
             save_as_rgb(image1, gt_w, gt_h, img_name)
 
-    for t in range(num_iterations):
-        _hdr_color = render_brdf(_surface, scene, _w, _h)
 
-        loss = compute_loss(ref, _hdr_color)
+    # render using downsampled source textures
 
-        if t % 100 == 0:
-            print(t, loss.item())
+    print("Save mip #0")
+    _w = texture_mips[0]['width']
+    _h = texture_mips[0]['height']
+    save_as_rgb(_saturate(texture_mips[0]['base_color'].detach()), _w, _h, "out/_albedo_mip_0.png")
+    save_as_normals(normalize_vec3(texture_mips[0]['normals'].detach()), _w, _h, "out/_normal_mip_0.png")
+    save_as_grayscale(_saturate(texture_mips[0]['roughness'].detach()), _w, _h, "out/_roughness_mip_0.png")
+    save_as_grayscale(_saturate(texture_mips[0]['metallic'].detach()), _w, _h, "out/_metallic_mip_0.png")
 
-        if t % 1000 == 0:
-            #for frame_num in range(num_frames):
-            if True:
-                frame_num = 0
-                image2 = slice_3d(_hdr_color, frame_num)
-                img_name = "out/steps/step{3}_mip_render_{0}_{1}x{2}.png".format(frame_num, _w, _h, t)
-                print(img_name)
-                #ldr_color2 = _saturate(linear_to_gamma(image2))
-                save_as_rgb(image2, _w, _h, img_name)
+    for current_mip in range(1, num_mips):
+        print("Optimize mip #" + str(current_mip))
+        _w = texture_mips[current_mip]['width']
+        _h = texture_mips[current_mip]['height']
 
-        loss.backward()
-        optimizer.step()
-        optimizer.zero_grad()
+        _base_color = texture_mips[current_mip]['base_color'].detach()
+        _base_color.requires_grad_(True)
 
-    print("Save resulting mip")
-    save_as_rgb(_saturate(_base_color), _w, _h, "out/albedo_mip_{0}.png".format(current_mip))
-    save_as_normals(normalize_vec3(_normals), _w, _h, "out/normal_mip_{0}.png".format(current_mip))
-    save_as_grayscale(_saturate(_roughness), _w, _h, "out/roughness_mip_{0}.png".format(current_mip))
-    save_as_grayscale(_saturate(_metallic), _w, _h, "out/metallic_mip_{0}.png".format(current_mip))
+        _normals = texture_mips[current_mip]['normals'].detach()
+        _normals.requires_grad_(True)
+
+        _roughness = texture_mips[current_mip]['roughness'].detach()
+        _roughness.requires_grad_(True)
+
+        _metallic = texture_mips[current_mip]['metallic'].detach()
+        _metallic.requires_grad_(True)
+
+        _positions = texture_mips[current_mip]['positions']
+
+        # _base_color = torch.full_like(_base_color, 0.01, requires_grad=True)
+        # _normals = torch.full_like(_normals, 0.01, requires_grad=True)
+        # _roughness = torch.full_like(_roughness, 0.01, requires_grad=True)
+        # _metallic = torch.full_like(_metallic, 0.01, requires_grad=True)
+
+        _surface = SurfaceProperties(_base_color, _normals, _roughness, _metallic, _positions)
+
+        ref = ground_truth[current_mip]['image'].detach()
+
+        assert_is_tensor_with_autograd(_base_color)
+        assert_is_tensor_with_autograd(_normals)
+        assert_is_tensor_with_autograd(_roughness)
+        assert_is_tensor_with_autograd(_metallic)
+        learning_rate = 0.005
+        optimizer = optim.Adam([_base_color, _normals, _roughness, _metallic], lr=learning_rate)
+
+        # learning_rate = 1.0
+        # optimizer = optim.SGD([_base_color, _normals, _roughness, _metallic], lr=learning_rate)
+
+        #torch.autograd.set_detect_anomaly(True)
+        _hdr_color = None
+
+        print("Save original mip")
+        save_as_rgb(_base_color, _w, _h, "out/_albedo_mip_{0}.png".format(current_mip))
+        save_as_normals(_normals, _w, _h, "out/_normal_mip_{0}.png".format(current_mip))
+        save_as_grayscale(_roughness, _w, _h, "out/_roughness_mip_{0}.png".format(current_mip))
+        save_as_grayscale(_metallic, _w, _h, "out/_metallic_mip_{0}.png".format(current_mip))
+
+        for t in range(num_iterations):
+            _hdr_color = render_brdf(_surface, scene, _w, _h)
+
+            loss = compute_loss(ref, _hdr_color)
+
+            if t % 100 == 0:
+                print(t, loss.item())
+
+            if t % 1000 == 0:
+                #for frame_num in range(num_frames):
+                if True:
+                    frame_num = 0
+                    image2 = slice_3d(_hdr_color, frame_num)
+                    img_name = "out/steps/step{3}_mip_render_{0}_{1}x{2}.png".format(frame_num, _w, _h, t)
+                    print(img_name)
+                    #ldr_color2 = _saturate(linear_to_gamma(image2))
+                    save_as_rgb(image2, _w, _h, img_name)
+
+            loss.backward()
+            optimizer.step()
+            optimizer.zero_grad()
+
+        print("Save resulting mip")
+        save_as_rgb(_saturate(_base_color), _w, _h, "out/albedo_mip_{0}.png".format(current_mip))
+        save_as_normals(normalize_vec3(_normals), _w, _h, "out/normal_mip_{0}.png".format(current_mip))
+        save_as_grayscale(_saturate(_roughness), _w, _h, "out/roughness_mip_{0}.png".format(current_mip))
+        save_as_grayscale(_saturate(_metallic), _w, _h, "out/metallic_mip_{0}.png".format(current_mip))
 
     #for frame_num in range(num_frames):
     if True:
@@ -996,4 +1010,4 @@ def test(current_mip, num_iterations=1500):
         save_as_rgb(image2, _w, _h, img_name)
 
 
-test(11, 3000)
+test(600)

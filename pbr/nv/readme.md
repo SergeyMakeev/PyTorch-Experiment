@@ -1,0 +1,1 @@
+https://github.com/shader-slang/slang-python/tree/main/examples/brdf-appearance-optimize-example
